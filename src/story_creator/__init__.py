@@ -293,7 +293,7 @@ class StoryCreator(BaseCreator):
                     ),
                 ),
             ],
-            icon="book-open",
+            icon="book-heart",
             view=CreatorView(entry="view/index.html"),
         )
 
