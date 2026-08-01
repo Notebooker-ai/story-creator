@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Story</title>
+<style>
+  :root { --ink:#2b2b2b; --muted:#8a8a8a; --paper:#fdfbf6; --accent:#4f46e5; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--paper); color:var(--ink);
+               font-family: Georgia, 'Times New Roman', serif; }
+  #app { display:flex; flex-direction:column; height:100%; max-width:900px; margin:0 auto; padding:12px; }
+  header { display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:4px 4px 10px; }
+  header h1 { font-size:1.15em; margin:0; font-weight:600; }
+  header .meta { color:var(--muted); font-size:.8em; font-family: system-ui, sans-serif; }
+  .art { position:relative; width:100%; aspect-ratio:1600/1000; border-radius:14px; overflow:hidden;
+         background:#eee; flex:none; }
+  .art .bg { position:absolute; inset:0; background-size:cover; background-position:center; }
+  .art .vec { position:absolute; inset:0; }
+  .art svg { width:100%; height:100%; display:block; }
+  .art.empty { display:none; }
+  .txt { flex:1; overflow:auto; font-size:1.12em; line-height:1.7; padding:16px 6px 8px;
+         white-space:pre-wrap; }
+  .moral { font-style:italic; color:var(--muted); margin-top:10px; }
+  .ending { text-align:center; font-variant:small-caps; letter-spacing:2px; margin-top:14px; }
+  .choices { display:flex; flex-direction:column; gap:8px; padding:6px 4px 4px; }
+  .choices button { font:inherit; text-align:left; padding:12px 14px; border-radius:10px;
+                    border:1px solid #ddd; background:#fff; cursor:pointer; }
+  .choices button:hover { border-color:var(--accent); }
+  nav { display:flex; align-items:center; justify-content:space-between; gap:8px;
+        padding:10px 4px 4px; font-family: system-ui, sans-serif; }
+  nav button { font:inherit; padding:8px 16px; border-radius:10px; border:1px solid #ddd;
+               background:#fff; cursor:pointer; }
+  nav button:disabled { opacity:.4; cursor:default; }
+  nav .pos { color:var(--muted); font-size:.85em; }
+  @keyframes bob { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-6px); } }
+  .vec .char { animation: bob 4.5s ease-in-out infinite; transform-box: fill-box; transform-origin: center bottom; }
+  @media (prefers-reduced-motion: reduce) { .vec .char { animation: none; } }
+  .placeholder { display:flex; height:100%; align-items:center; justify-content:center;
+                 color:var(--muted); font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div id="app"><div class="placeholder">Loading story…</div></div>
+<script>
+(function () {
+  'use strict';
+  var story = null;
+  var byId = {};
+  var linearOrder = [];
+  var current = null;       // page id
+  var history = [];         // adventure back-stack
+  var app = document.getElementById('app');
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  // The svg strings were sanitized creator-side; parse them as XML anyway and
+  // only adopt the root <svg> if parsing succeeded, as defense in depth.
+  function svgNode(markup) {
+    try {
+      var doc = new DOMParser().parseFromString(markup, 'image/svg+xml');
+      var root = doc.documentElement;
+      if (root && root.nodeName.toLowerCase() === 'svg' &&
+          !doc.querySelector('parsererror')) {
+        return document.importNode(root, true);
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function settingOf(page) {
+    if (!page.setting_id) return null;
+    for (var i = 0; i < (story.settings || []).length; i++) {
+      if (story.settings[i].id === page.setting_id) return story.settings[i];
+    }
+    return null;
+  }
+
+  function isAdventure() { return story.story_type === 'adventure'; }
+
+  function render() {
+    var page = byId[current];
+    if (!page) return;
+    app.textContent = '';
+
+    var header = el('header');
+    var h1 = el('h1', null, story.title);
+    var meta = el('span', 'meta',
+      isAdventure() ? (page.is_ending ? 'an ending' : 'choose your path')
+                    : (page.number + ' / ' + linearOrder.length));
+    header.appendChild(h1); header.appendChild(meta);
+    app.appendChild(header);
+
+    var art = el('div', 'art' + (page.svg ? '' : ' empty'));
+    var setting = settingOf(page);
+    if (setting && setting.background_data_uri &&
+        /^data:image\//.test(setting.background_data_uri)) {
+      var bg = el('div', 'bg');
+      bg.style.backgroundImage = 'url("' + setting.background_data_uri + '")';
+      art.appendChild(bg);
+    }
+    if (page.svg) {
+      var node = svgNode(page.svg);
+      if (node) { var vec = el('div', 'vec'); vec.appendChild(node); art.appendChild(vec); }
+    }
+    app.appendChild(art);
+
+    var txt = el('div', 'txt', page.text);
+    if (page.is_ending) txt.appendChild(el('p', 'ending', 'The End'));
+    if (page.is_ending && story.moral) txt.appendChild(el('p', 'moral', story.moral));
+    app.appendChild(txt);
+
+    if (isAdventure()) {
+      var box = el('div', 'choices');
+      (page.choices || []).forEach(function (c) {
+        var b = el('button', null, c.text);
+        b.onclick = function () { history.push(current); current = c.target_page_id; render(); };
+        box.appendChild(b);
+      });
+      app.appendChild(box);
+      var nav = el('nav');
+      var back = el('button', null, '\u2190 Back');
+      back.disabled = history.length === 0;
+      back.onclick = function () { if (history.length) { current = history.pop(); render(); } };
+      var restart = el('button', null, 'Start over');
+      restart.onclick = function () { history = []; current = story.start_page_id || linearOrder[0]; render(); };
+      nav.appendChild(back); nav.appendChild(restart);
+      app.appendChild(nav);
+    } else {
+      var idx = linearOrder.indexOf(current);
+      var nav2 = el('nav');
+      var prev = el('button', null, '\u2190 Previous');
+      prev.disabled = idx <= 0;
+      prev.onclick = function () { if (idx > 0) { current = linearOrder[idx - 1]; render(); } };
+      var pos = el('span', 'pos', 'Page ' + page.number + ' of ' + linearOrder.length);
+      var next = el('button', null, 'Next \u2192');
+      next.disabled = idx >= linearOrder.length - 1;
+      next.onclick = function () { if (idx < linearOrder.length - 1) { current = linearOrder[idx + 1]; render(); } };
+      nav2.appendChild(prev); nav2.appendChild(pos); nav2.appendChild(next);
+      app.appendChild(nav2);
+    }
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (!story || isAdventure()) return;
+    var idx = linearOrder.indexOf(current);
+    if (e.key === 'ArrowRight' && idx < linearOrder.length - 1) { current = linearOrder[idx + 1]; render(); }
+    if (e.key === 'ArrowLeft' && idx > 0) { current = linearOrder[idx - 1]; render(); }
+  });
+
+  window.addEventListener('message', function (e) {
+    var msg = e.data;
+    if (!msg || msg.type !== 'open-notebook:artifact') return;
+    if (msg.schema_id !== 'story.v1') {
+      app.textContent = '';
+      app.appendChild(el('div', 'placeholder', 'Unsupported artifact version: ' + msg.schema_id));
+      return;
+    }
+    story = msg.data || {};
+    byId = {};
+    (story.pages || []).forEach(function (p) { byId[p.id] = p; });
+    linearOrder = (story.pages || []).slice()
+      .sort(function (a, b) { return a.number - b.number; })
+      .map(function (p) { return p.id; });
+    if (!linearOrder.length) {
+      app.textContent = '';
+      app.appendChild(el('div', 'placeholder', 'This story has no pages.'));
+      return;
+    }
+    current = (isAdventure() && story.start_page_id && byId[story.start_page_id])
+      ? story.start_page_id : linearOrder[0];
+    history = [];
+    render();
+  });
+
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: 'open-notebook:ready' }, '*');
+  }
+})();
+</script>
+</body>
+</html>
