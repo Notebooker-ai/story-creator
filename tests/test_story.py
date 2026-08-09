@@ -1,9 +1,9 @@
 """Tests for StoryCreator using stubbed models (no network).
 
-Covers the sanitizer's security properties, adventure graph validation, and
-full generate runs: linear picture book, branching adventure, diffusion
-backgrounds via a fake image role, and graceful degradation when the image
-role is absent.
+Covers adventure graph validation and full generate runs: linear picture book,
+branching adventure, the tiered illustration pipeline (reference-conditioned
+edits, prompt-only fallback), and graceful degradation when the image role is
+absent or broken.
 """
 
 from __future__ import annotations
@@ -16,13 +16,7 @@ from open_notebook_creator_sdk import ContentBundle, CreationRequest, ModelRole
 from open_notebook_creator_sdk.schemas import validate_artifact_data
 from open_notebook_creator_sdk.testing import assert_creator_compliant
 
-from story_creator import StoryCreator, _validate_graph
-from story_creator.svgkit import (
-    compose_page,
-    extract_symbols,
-    sanitize_fragment,
-    used_symbol_ids,
-)
+from story_creator import StoryConfig, StoryCreator, _validate_graph
 
 # --- fakes -------------------------------------------------------------------
 
@@ -58,43 +52,61 @@ _TINY_PNG = bytes.fromhex(
 )
 
 
-class _FakeImageModel:
+class _EditsImageModel:
+    """Backend with a working /images/edits: records every call."""
+
+    def __init__(self):
+        self.generate_prompts: list[str] = []
+        self.edit_prompts: list[str] = []
+        self.edit_references: list[list[bytes]] = []
+
     async def agenerate_image(self, prompt: str, size: str = "1024x1024") -> bytes:
-        assert "no characters" in prompt.lower()
+        self.generate_prompts.append(prompt)
+        return _TINY_PNG
+
+    async def agenerate_image_edit(
+        self, prompt: str, images: list, size: str = "1024x1024"
+    ) -> bytes:
+        self.edit_prompts.append(prompt)
+        self.edit_references.append(list(images))
         return _TINY_PNG
 
 
-class _ImageRole(ModelRole):
-    def create_image(self, **_):
-        return _FakeImageModel()
+class _NoEditsImageModel(_EditsImageModel):
+    """Backend without edits: the probe must fall back to plain generations."""
+
+    async def agenerate_image_edit(self, prompt, images, size="1024x1024"):
+        self.edit_prompts.append(prompt)
+        raise RuntimeError("404 no such endpoint")
 
 
 class _BrokenImageModel:
     async def agenerate_image(self, prompt: str, size: str = "1024x1024") -> bytes:
         raise RuntimeError("provider down")
 
+    async def agenerate_image_edit(self, prompt, images, size="1024x1024"):
+        raise RuntimeError("provider down")
 
-class _BrokenImageRole(ModelRole):
+
+class _ImageRole(ModelRole):
+    """Hands out one shared fake image model instance so tests can inspect it."""
+
     def create_image(self, **_):
-        return _BrokenImageModel()
+        return _IMAGE_MODELS[self.model]
+
+
+# Registry keyed by the role's model name; reset per test via _image_role().
+_IMAGE_MODELS: dict = {}
+
+
+def _image_role(kind: str) -> _ImageRole:
+    model = {"edits": _EditsImageModel, "noedits": _NoEditsImageModel,
+             "broken": _BrokenImageModel}[kind]()
+    _IMAGE_MODELS[kind] = model
+    return _ImageRole(provider="fake", model=kind)
 
 
 # --- payload builders --------------------------------------------------------
-
-_DEFS = """<defs>
-<symbol id="char-fox" viewBox="0 0 200 200">
-  <ellipse cx="100" cy="120" rx="60" ry="70" fill="#e8a04c"/>
-  <circle cx="100" cy="60" r="40" fill="#e8a04c"/>
-  <polygon points="70,30 85,55 55,55" fill="#c2543a"/>
-</symbol>
-<symbol id="prop-star" viewBox="0 0 200 200">
-  <polygon points="100,10 120,80 190,80 130,120 150,190 100,145 50,190 70,120 10,80 80,80" fill="#f4e9d8"/>
-</symbol>
-</defs>"""
-
-_SCENE = """<rect x="0" y="0" width="1600" height="700" fill="#5b7fa6"/>
-<rect x="0" y="700" width="1600" height="300" fill="#2d4a3e"/>
-<g class="char"><use href="#char-fox" x="600" y="500" width="300" height="300"/></g>"""
 
 
 def _story(story_type: str, pages):
@@ -105,7 +117,15 @@ def _story(story_type: str, pages):
             "moral": "Curiosity feeds the mind." if story_type == "fable" else None,
             "palette": ["#2d4a3e", "#e8a04c", "#c2543a", "#f4e9d8", "#5b7fa6"],
             "characters": [
-                {"id": "fox", "name": "Fig", "description": "small orange fox, red ears"}
+                {
+                    "id": "fox",
+                    "name": "Fig",
+                    "description": "a curious young fox",
+                    "visual": (
+                        "small orange fox with cream chest, red-tipped ears, "
+                        "and a green woolen scarf"
+                    ),
+                }
             ],
             "settings": [
                 {"id": "forest", "name": "The Forest", "description": "deep green pines"}
@@ -177,63 +197,12 @@ def test_manifest_declares_optional_image_role_and_view():
     assert m.view is not None and m.view.entry == "view/index.html"
 
 
-# --- sanitizer ---------------------------------------------------------------
-
-
-def test_sanitizer_strips_script_and_events():
-    bad = (
-        '<script>alert(1)</script>'
-        '<rect x="0" y="0" width="10" height="10" fill="#112233" onclick="evil()"/>'
-        '<circle cx="5" cy="5" r="2" fill="#112233"/>'
+def test_legacy_svg_configs_map_to_pictures():
+    assert StoryConfig.model_validate({"illustrations": "svg"}).illustrations == "pictures"
+    assert (
+        StoryConfig.model_validate({"illustrations": "svg-with-backgrounds"}).illustrations
+        == "pictures"
     )
-    out = sanitize_fragment(bad, set())
-    assert out is not None
-    assert "script" not in out and "onclick" not in out
-    assert "<circle" in out  # element with a handler is dropped, clean one kept
-    assert "<rect" not in out
-
-
-def test_sanitizer_blocks_external_and_unknown_use():
-    bad = (
-        '<use href="https://evil.example/x.svg#a"/>'
-        '<use href="#char-ghost"/>'
-        '<use href="#char-fox" x="1" y="2"/>'
-    )
-    out = sanitize_fragment(bad, {"char-fox"})
-    assert out is not None
-    assert out.count("<use") == 1 and 'href="#char-fox"' in out
-
-
-def test_sanitizer_blocks_image_foreignobject_and_css_url():
-    bad = (
-        '<image href="https://evil.example/a.png"/>'
-        '<foreignObject><div>hi</div></foreignObject>'
-        '<rect x="0" y="0" width="9" height="9" fill="url(#grad)"/>'
-        '<rect x="0" y="0" width="9" height="9" fill="#abcdef"/>'
-    )
-    out = sanitize_fragment(bad, set())
-    assert out is not None
-    assert "image" not in out and "foreignObject" not in out and "url(" not in out
-
-
-def test_sanitizer_rejects_garbage():
-    assert sanitize_fragment("<rect unterminated", set()) is None
-    assert sanitize_fragment("", set()) is None
-
-
-def test_extract_symbols_and_compose():
-    syms = dict(extract_symbols(_DEFS))
-    assert set(syms) == {"char-fox", "prop-star"}
-    clean = sanitize_fragment(_SCENE, set(syms))
-    assert clean is not None
-    page = compose_page(clean, syms, 'A fox <in> the "woods"')
-    assert page.startswith("<svg") and 'viewBox="0 0 1600 1000"' in page
-    assert "char-fox" in page and "prop-star" not in page  # only used symbols inlined
-    assert "<" not in page.split('aria-label="', 1)[1].split('"', 1)[0]
-
-
-def test_used_symbol_ids():
-    assert used_symbol_ids(_SCENE) == {"char-fox"}
 
 
 # --- graph validation --------------------------------------------------------
@@ -261,29 +230,79 @@ def test_graph_linear_drops_choices():
 
 
 @pytest.mark.asyncio
-async def test_generate_picture_book_linear():
+async def test_generate_picture_book_with_reference_conditioning():
     with tempfile.TemporaryDirectory() as td:
-        payloads = [_story("picture-book", _linear_pages(4)), _DEFS, _SCENE]
         result = await StoryCreator().generate(
-            _request(td, payloads, {"story_type": "picture-book", "num_pages": 4})
+            _request(
+                td,
+                [_story("picture-book", _linear_pages(4))],
+                {"story_type": "picture-book", "num_pages": 4},
+                image_role=_image_role("edits"),
+            )
         )
         assert result.status == "SUCCESS", result.errors
         data = validate_artifact_data("story.v1", result.data)
         assert data.story_type == "picture-book"
         assert len(data.pages) == 4
-        assert all(p.svg and p.svg.startswith("<svg") for p in data.pages)
-        assert all(not p.choices for p in data.pages)
-        assert any(f.label == "book" for f in result.files)
+        assert all(
+            p.image_data_uri and p.image_data_uri.startswith("data:image/")
+            for p in data.pages
+        )
+        assert all(p.svg is None for p in data.pages)
+        assert data.characters[0].visual.startswith("small orange fox")
+
+        model = _IMAGE_MODELS["edits"]
+        # One plain generation (the cast sheet), then every page via edits
+        # conditioned on those exact bytes.
+        assert len(model.generate_prompts) == 1
+        assert "model sheet" in model.generate_prompts[0].lower()
+        assert "green woolen scarf" in model.generate_prompts[0]
+        assert len(model.edit_prompts) == 4
+        assert all(refs == [_TINY_PNG] for refs in model.edit_references)
+        assert all("green woolen scarf" in p for p in model.edit_prompts)
+        assert all("no text" in p.lower() for p in model.edit_prompts)
+
+        labels = {(f.label or "") for f in result.files}
+        assert "cast-sheet" in labels
+        assert any(l.startswith("page:") for l in labels)
         book = open(f"{td}/story-book.html").read()
-        assert "The Curious Fox" in book and "char-fox" in book
+        assert "The Curious Fox" in book and "data:image/" in book
+
+
+@pytest.mark.asyncio
+async def test_edits_unsupported_falls_back_to_prompt_only():
+    with tempfile.TemporaryDirectory() as td:
+        result = await StoryCreator().generate(
+            _request(
+                td,
+                [_story("picture-book", _linear_pages(4))],
+                {"story_type": "picture-book", "num_pages": 4},
+                image_role=_image_role("noedits"),
+            )
+        )
+        assert result.status == "SUCCESS", result.errors
+        data = validate_artifact_data("story.v1", result.data)
+        assert all(p.image_data_uri for p in data.pages)
+
+        model = _IMAGE_MODELS["noedits"]
+        # The probe tries edits exactly once, then the whole book uses plain
+        # generations: cast sheet + 4 pages.
+        assert len(model.edit_prompts) == 1
+        assert len(model.generate_prompts) == 5
+        page_prompts = model.generate_prompts[1:]
+        assert all("green woolen scarf" in p for p in page_prompts)
+        assert all("Fig walks under the pines" in p for p in page_prompts)
 
 
 @pytest.mark.asyncio
 async def test_generate_adventure_branching():
     with tempfile.TemporaryDirectory() as td:
-        payloads = [_story("adventure", _ADV_PAGES), _DEFS, _SCENE]
         result = await StoryCreator().generate(
-            _request(td, payloads, {"story_type": "adventure", "num_pages": 6})
+            _request(
+                td,
+                [_story("adventure", _ADV_PAGES)],
+                {"story_type": "adventure", "num_pages": 6, "illustrations": "none"},
+            )
         )
         assert result.status == "SUCCESS", result.errors
         data = validate_artifact_data("story.v1", result.data)
@@ -300,73 +319,53 @@ async def test_generate_adventure_branching():
 @pytest.mark.asyncio
 async def test_generate_fable_carries_moral():
     with tempfile.TemporaryDirectory() as td:
-        payloads = [_story("fable", _linear_pages(4)), _DEFS, _SCENE]
         result = await StoryCreator().generate(
-            _request(td, payloads, {"story_type": "fable", "num_pages": 4})
+            _request(
+                td,
+                [_story("fable", _linear_pages(4))],
+                {"story_type": "fable", "num_pages": 4, "illustrations": "none"},
+            )
         )
         data = validate_artifact_data("story.v1", result.data)
         assert data.moral == "Curiosity feeds the mind."
 
 
 @pytest.mark.asyncio
-async def test_generate_with_diffusion_backgrounds():
+async def test_pictures_degrade_without_image_role():
     with tempfile.TemporaryDirectory() as td:
-        payloads = [_story("picture-book", _linear_pages(4)), _DEFS, _SCENE]
         result = await StoryCreator().generate(
             _request(
                 td,
-                payloads,
-                {"story_type": "picture-book", "num_pages": 4,
-                 "illustrations": "svg-with-backgrounds"},
-                image_role=_ImageRole(provider="fake", model="fake-image"),
-            )
-        )
-        assert result.status == "SUCCESS", result.errors
-        data = validate_artifact_data("story.v1", result.data)
-        forest = next(s for s in data.settings if s.id == "forest")
-        assert forest.background_data_uri and forest.background_data_uri.startswith("data:image/")
-        assert any((f.label or "").startswith("background:") for f in result.files)
-
-
-@pytest.mark.asyncio
-async def test_backgrounds_degrade_without_image_role():
-    with tempfile.TemporaryDirectory() as td:
-        payloads = [_story("bedtime", _linear_pages(4)), _DEFS, _SCENE]
-        result = await StoryCreator().generate(
-            _request(
-                td,
-                payloads,
-                {"story_type": "bedtime", "num_pages": 4,
-                 "illustrations": "svg-with-backgrounds"},
+                [_story("bedtime", _linear_pages(4))],
+                {"story_type": "bedtime", "num_pages": 4},
             )
         )
         assert result.status == "SUCCESS"
         data = validate_artifact_data("story.v1", result.data)
-        assert all(s.background_data_uri is None for s in data.settings)
+        assert all(p.image_data_uri is None for p in data.pages)
         assert any("no image model" in w.lower() for w in result.warnings)
 
 
 @pytest.mark.asyncio
-async def test_backgrounds_degrade_when_image_provider_fails():
+async def test_pictures_degrade_when_image_provider_fails():
     with tempfile.TemporaryDirectory() as td:
-        payloads = [_story("picture-book", _linear_pages(4)), _DEFS, _SCENE]
         result = await StoryCreator().generate(
             _request(
                 td,
-                payloads,
-                {"story_type": "picture-book", "num_pages": 4,
-                 "illustrations": "svg-with-backgrounds"},
-                image_role=_BrokenImageRole(provider="fake", model="fake-image"),
+                [_story("picture-book", _linear_pages(4))],
+                {"story_type": "picture-book", "num_pages": 4},
+                image_role=_image_role("broken"),
             )
         )
         assert result.status == "SUCCESS"
         data = validate_artifact_data("story.v1", result.data)
-        assert all(s.background_data_uri is None for s in data.settings)
-        assert any("could not be painted" in w for w in result.warnings)
+        assert all(p.image_data_uri is None for p in data.pages)
+        assert any("cast reference sheet" in w for w in result.warnings)
+        assert any("no illustration" in w for w in result.warnings)
 
 
 @pytest.mark.asyncio
-async def test_text_only_mode_skips_symbol_and_scene_calls():
+async def test_text_only_mode_makes_no_image_calls():
     with tempfile.TemporaryDirectory() as td:
         role = _QueueRole(
             provider="fake", model="fake",
@@ -377,15 +376,18 @@ async def test_text_only_mode_skips_symbol_and_scene_calls():
                 content=ContentBundle(text="material"),
                 config={"story_type": "short-story", "num_pages": 4,
                         "illustrations": "none"},
-                models={"text": role},
+                models={"text": role,
+                        "image": _image_role("edits")},
                 output_dir=td,
                 artifact_id="a",
             )
         )
         assert result.status == "SUCCESS"
         assert role.calls == 1  # only the story pass
+        model = _IMAGE_MODELS["edits"]
+        assert not model.generate_prompts and not model.edit_prompts
         data = validate_artifact_data("story.v1", result.data)
-        assert all(p.svg is None for p in data.pages)
+        assert all(p.image_data_uri is None for p in data.pages)
 
 
 @pytest.mark.asyncio
@@ -397,9 +399,9 @@ async def test_adventure_without_reachable_ending_fails():
             {"id": "b", "text": "Loop back.", "setting_id": "forest", "character_ids": [],
              "scene": "", "choices": [{"text": "back", "target_page_id": "a"}], "is_ending": False},
         ]
-        payloads = [_story("adventure", loop_pages), _DEFS, _SCENE]
         result = await StoryCreator().generate(
-            _request(td, payloads, {"story_type": "adventure", "num_pages": 4})
+            _request(td, [_story("adventure", loop_pages)],
+                     {"story_type": "adventure", "num_pages": 4, "illustrations": "none"})
         )
         assert result.status == "FAILURE"
         assert any("ending" in e.message for e in result.errors)

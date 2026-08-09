@@ -15,6 +15,10 @@
   header .meta { color:var(--muted); font-size:.8em; font-family: system-ui, sans-serif; }
   .art { position:relative; width:100%; aspect-ratio:1600/1000; border-radius:14px; overflow:hidden;
          background:#eee; flex:none; }
+  /* Diffusion pages are square; cap height so the text keeps room. */
+  .art.photo { aspect-ratio:1/1; max-height:58vh; width:auto; max-width:100%;
+               align-self:center; }
+  .art img.pic { width:100%; height:100%; object-fit:cover; display:block; }
   .art .bg { position:absolute; inset:0; background-size:cover; background-position:center; }
   .art .vec { position:absolute; inset:0; }
   .art svg { width:100%; height:100%; display:block; }
@@ -96,17 +100,26 @@
     header.appendChild(h1); header.appendChild(meta);
     app.appendChild(header);
 
-    var art = el('div', 'art' + (page.svg ? '' : ' empty'));
-    var setting = settingOf(page);
-    if (setting && setting.background_data_uri &&
-        /^data:image\//.test(setting.background_data_uri)) {
-      var bg = el('div', 'bg');
-      bg.style.backgroundImage = 'url("' + setting.background_data_uri + '")';
-      art.appendChild(bg);
-    }
-    if (page.svg) {
-      var node = svgNode(page.svg);
-      if (node) { var vec = el('div', 'vec'); vec.appendChild(node); art.appendChild(vec); }
+    var hasImage = page.image_data_uri && /^data:image\//.test(page.image_data_uri);
+    var art = el('div', 'art' + (hasImage ? ' photo' : page.svg ? '' : ' empty'));
+    if (hasImage) {
+      var pic = el('img', 'pic');
+      pic.src = page.image_data_uri;
+      pic.alt = '';
+      art.appendChild(pic);
+    } else {
+      // Legacy structural-SVG artifacts: setting background + vector scene.
+      var setting = settingOf(page);
+      if (setting && setting.background_data_uri &&
+          /^data:image\//.test(setting.background_data_uri)) {
+        var bg = el('div', 'bg');
+        bg.style.backgroundImage = 'url("' + setting.background_data_uri + '")';
+        art.appendChild(bg);
+      }
+      if (page.svg) {
+        var node = svgNode(page.svg);
+        if (node) { var vec = el('div', 'vec'); vec.appendChild(node); art.appendChild(vec); }
+      }
     }
     app.appendChild(art);
 

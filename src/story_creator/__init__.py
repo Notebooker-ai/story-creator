@@ -2,14 +2,15 @@
 illustrated, optionally branching story (emitted as ``story.v1``).
 
 Five narrative forms share one pipeline: a story pass writes the page graph
-(characters, settings, palette, per-page text + scene notes, and — for
-adventures — choices and endings); an optional symbols pass draws a vetted SVG
-``<symbol>`` library so every character is byte-identical on every page; a
-bounded per-page fan-out composes each illustration from those symbols; and an
-optional diffusion pass (the ``image`` model role) paints one style-locked
-background per *setting*, layered behind the vector scene by renderers. Every
-LLM-authored SVG byte passes the whitelist sanitizer in :mod:`.svgkit` before
-it can reach a view bundle or a published page.
+(characters with locked ``visual`` specs, settings, palette, per-page text +
+scene notes, and — for adventures — choices and endings); an optional art pass
+paints one full-page diffusion illustration per page via the ``image`` model
+role. Character identity across pages is tiered: every page prompt embeds each
+character's canonical visual spec verbatim (baseline), and when the image
+backend supports the OpenAI-shaped ``/images/edits`` endpoint, a single
+cast-sheet image is painted first and passed as a reference on every page
+(reference conditioning). Without an image model the creator degrades
+gracefully to a text-only story.
 """
 
 from __future__ import annotations
@@ -42,34 +43,31 @@ from open_notebook_creator_sdk.schemas.story_v1 import (
     StorySetting,
     StoryV1,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from .svgkit import compose_page, extract_symbols, sanitize_fragment
-
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 SCHEMA_ID = "story.v1"
 _MAX_CONCURRENT_PAGES = 4
 _MAX_SETTINGS = 6
-_BG_SIZE = "1024x1024"
+_IMG_SIZE = "1024x1024"
 
 StoryType = Literal["picture-book", "short-story", "fable", "bedtime", "adventure"]
 ReadingAge = Literal["toddler", "early-reader", "middle-grade", "all-ages"]
-Illustrations = Literal["none", "svg", "svg-with-backgrounds"]
+Illustrations = Literal["none", "pictures"]
 Style = Literal["paper-cutout", "geometric", "night-sky"]
 
 _STYLE_PROMPTS: Dict[str, str] = {
     "paper-cutout": (
-        "flat paper-cutout children's book background, layered soft shapes, "
-        "torn-paper texture, gentle lighting"
+        "flat paper-cutout collage style, layered soft shapes, torn-paper "
+        "texture, gentle lighting"
     ),
     "geometric": (
-        "flat geometric children's book background, simple bold shapes, "
-        "clean mid-century style"
+        "flat geometric style, simple bold shapes, clean mid-century "
+        "children's book look"
     ),
     "night-sky": (
-        "flat night-sky children's book background, silhouettes, stars, "
-        "deep calm colors"
+        "soft night-sky style, gentle silhouettes, stars, deep calm colors"
     ),
 }
 
@@ -92,16 +90,24 @@ class StoryConfig(BaseModel):
         default="all-ages", description="toddler, early-reader, middle-grade, or all-ages"
     )
     illustrations: Illustrations = Field(
-        default="svg",
+        default="pictures",
         description=(
-            "none (text only), svg (vector scenes), or svg-with-backgrounds "
-            "(adds one AI-painted background per setting; needs an image model)"
+            "none (text only) or pictures (one AI-painted illustration per "
+            "page; needs an image model)"
         ),
     )
     style: Style = Field(
         default="paper-cutout",
         description="Illustration style: paper-cutout, geometric, or night-sky",
     )
+
+    @field_validator("illustrations", mode="before")
+    @classmethod
+    def _migrate_legacy_illustrations(cls, v: Any) -> Any:
+        # Configs saved by the structural-SVG era map onto the diffusion mode.
+        if v in ("svg", "svg-with-backgrounds"):
+            return "pictures"
+        return v
 
 
 def _strip_fences(text: str) -> str:
@@ -178,7 +184,7 @@ def _validate_graph(
 
 
 def _try_compress_jpeg(png_bytes: bytes) -> tuple[bytes, str]:
-    """Shrink a background for inline storage; fall back to the original."""
+    """Shrink an illustration for inline storage; fall back to the original."""
     try:
         from PIL import Image  # optional but listed in deps
 
@@ -191,21 +197,63 @@ def _try_compress_jpeg(png_bytes: bytes) -> tuple[bytes, str]:
         return png_bytes, "image/png"
 
 
+def _character_line(c: Dict[str, str]) -> str:
+    return f"{c['name']} — {c.get('visual') or c.get('description') or ''}".strip(" —")
+
+
+def _cast_sheet_prompt(characters: List[Dict[str, str]], style: str, palette: List[str]) -> str:
+    return (
+        f"Character model sheet, {_STYLE_PROMPTS[style]}. "
+        "All characters full-body, standing side by side on a plain light "
+        "background, facing forward: "
+        + "; ".join(_character_line(c) for c in characters)
+        + f". Color palette: {', '.join(palette)}. "
+        "No text, no letters, no labels, no words."
+    )
+
+
+def _page_prompt(
+    page: Dict[str, Any],
+    setting: Optional[Dict[str, Any]],
+    characters: List[Dict[str, str]],
+    style: str,
+    palette: List[str],
+    with_reference: bool,
+) -> str:
+    parts: List[str] = []
+    if with_reference:
+        parts.append(
+            "Using the reference image as the definitive character designs, "
+            f"paint a children's picture-book illustration, {_STYLE_PROMPTS[style]}."
+        )
+    else:
+        parts.append(
+            f"Children's picture-book illustration, {_STYLE_PROMPTS[style]}."
+        )
+    parts.append(f"Scene: {page['scene'] or page['text'][:200]}")
+    if setting:
+        parts.append(f"Setting: {setting['description'] or setting['name']}")
+    if characters:
+        parts.append(
+            "Characters (must look EXACTLY like this — same colors, clothing, "
+            "and features on every page): "
+            + "; ".join(_character_line(c) for c in characters)
+        )
+    parts.append(f"Color palette: {', '.join(palette)}.")
+    parts.append("No text, no letters, no words, no captions.")
+    return " ".join(parts)
+
+
 def _book_html(story: StoryV1) -> str:
     """A standalone, print-ready HTML book. Linear types read in order; an
     adventure prints in the classic 'turn to page N' style."""
     esc = html_lib.escape
     number_of = {p.id: p.number for p in story.pages}
-    bg_of = {s.id: s.background_data_uri for s in story.settings}
     pages_html: List[str] = []
     for p in sorted(story.pages, key=lambda x: x.number):
-        bg = bg_of.get(p.setting_id or "")
-        layers = []
-        if p.svg:
-            bg_div = (
-                f'<div class="bg" style="background-image:url({bg})"></div>' if bg else ""
-            )
-            layers.append(f'<div class="art">{bg_div}<div class="vec">{p.svg}</div></div>')
+        art = ""
+        if p.image_data_uri:
+            art = f'<div class="art"><img src="{p.image_data_uri}" alt=""></div>'
         choices = ""
         if p.choices:
             items = "".join(
@@ -217,7 +265,7 @@ def _book_html(story: StoryV1) -> str:
         ending = '<p class="ending">The End</p>' if p.is_ending else ""
         pages_html.append(
             f'<section class="page"><div class="num">{p.number}</div>'
-            f"{''.join(layers)}<div class=\"txt\">{esc(p.text)}</div>"
+            f"{art}<div class=\"txt\">{esc(p.text)}</div>"
             f"{choices}{ending}</section>"
         )
     dedication = (
@@ -235,11 +283,9 @@ def _book_html(story: StoryV1) -> str:
   .cover, .page {{ max-width: 760px; margin: 0 auto; padding: 48px 32px; page-break-after: always; }}
   .cover h1 {{ font-size: 2.4em; text-align: center; margin-top: 20vh; }}
   .dedication {{ text-align: center; font-style: italic; color: #555; }}
-  .art {{ position: relative; width: 100%; aspect-ratio: 1600 / 1000; margin-bottom: 24px;
+  .art {{ width: 100%; aspect-ratio: 1 / 1; margin-bottom: 24px;
          border-radius: 12px; overflow: hidden; }}
-  .art .bg {{ position: absolute; inset: 0; background-size: cover; background-position: center; }}
-  .art .vec {{ position: absolute; inset: 0; }}
-  .art svg {{ width: 100%; height: 100%; display: block; }}
+  .art img {{ width: 100%; height: 100%; object-fit: cover; display: block; }}
   .txt {{ font-size: 1.15em; line-height: 1.7; white-space: pre-wrap; }}
   .num {{ text-align: right; color: #999; font-size: 0.85em; }}
   .choices {{ margin-top: 20px; font-size: 1.05em; }}
@@ -270,26 +316,27 @@ class StoryCreator(BaseCreator):
             version=__version__,
             description=(
                 "Turn your sources into a story — a picture book, short story, "
-                "fable, bedtime story, or a branching adventure — with "
-                "consistent SVG illustrations and optional AI-painted "
-                "backgrounds."
+                "fable, bedtime story, or a branching adventure — with one "
+                "AI-painted illustration per page and characters kept "
+                "consistent across the whole book."
             ),
-            sdk_compat=">=0.8,<1",
+            sdk_compat=">=0.9,<1",
             emits=[SCHEMA_ID],
             model_roles=[
                 ModelRoleSpec(
                     key="text",
                     kind="language",
                     requires=["structured_json"],
-                    description="LLM that writes the story, symbols, and scenes.",
+                    description="LLM that writes the story and scene notes.",
                 ),
                 ModelRoleSpec(
                     key="image",
                     kind="image",
                     required=False,
                     description=(
-                        "Optional image model that paints one background per "
-                        "setting (used only for 'svg-with-backgrounds')."
+                        "Image model that paints the per-page illustrations "
+                        "(required for 'pictures'; without it the story is "
+                        "text-only)."
                     ),
                 ),
             ],
@@ -351,6 +398,7 @@ class StoryCreator(BaseCreator):
                     "id": cid,
                     "name": str(c.get("name") or cid).strip()[:60],
                     "description": str(c.get("description") or "").strip()[:300],
+                    "visual": str(c.get("visual") or "").strip()[:500],
                 }
             )
         settings: List[Dict[str, Any]] = []
@@ -363,7 +411,6 @@ class StoryCreator(BaseCreator):
                     "id": sid,
                     "name": str(s.get("name") or sid).strip()[:80],
                     "description": str(s.get("description") or "").strip()[:300],
-                    "background_data_uri": None,
                 }
             )
         setting_ids = {s["id"] for s in settings}
@@ -401,7 +448,7 @@ class StoryCreator(BaseCreator):
                         c for c in (p.get("character_ids") or []) if c in char_ids
                     ][:4],
                     "scene": str(p.get("scene") or "").strip()[:400],
-                    "svg": None,
+                    "image_data_uri": None,
                     "choices": choices,
                     "is_ending": bool(p.get("is_ending")),
                 }
@@ -429,114 +476,114 @@ class StoryCreator(BaseCreator):
                 user_message="The adventure had no reachable ending. Please retry.",
             )
 
-        # ---- symbols pass ---------------------------------------------------
-        symbols: Dict[str, str] = {}
-        if cfg.illustrations != "none":
-            sym_prompt = Prompter(template_text=_read_prompt("symbols.jinja")).render(
-                {
-                    "characters": characters,
-                    "palette": palette,
-                    "style": cfg.style,
-                    "title": title,
-                }
-            )
-            try:
-                s_llm = role.create_language(max_tokens=6000)
-                s_resp = await s_llm.ainvoke(sym_prompt)
-                s_raw = s_resp.content if hasattr(s_resp, "content") else str(s_resp)
-                symbols = dict(extract_symbols(s_raw))
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"story: symbols pass failed: {e}")
-            missing = [c["id"] for c in characters if f"char-{c['id']}" not in symbols]
-            if missing:
-                warnings.append(
-                    "Some characters have no drawn symbol; scenes use scenery only for: "
-                    + ", ".join(missing)
-                )
+        # ---- illustrations (full-page diffusion) ----------------------------
+        from pathlib import Path
 
-        # ---- per-page scenes (bounded fan-out) ------------------------------
-        if cfg.illustrations != "none":
-            page_template = _read_prompt("page.jinja")
-            sem = asyncio.Semaphore(_MAX_CONCURRENT_PAGES)
-            symbol_ids = set(symbols.keys())
-            settings_by_id = {s["id"]: s for s in settings}
-
-            async def draw(p: Dict[str, Any]) -> Optional[str]:
-                prompt = Prompter(template_text=page_template).render(
-                    {
-                        "page": p,
-                        "setting": settings_by_id.get(p["setting_id"] or ""),
-                        "symbol_ids": sorted(symbol_ids),
-                        "palette": palette,
-                        "style": cfg.style,
-                    }
-                )
-                async with sem:
-                    try:
-                        d_llm = role.create_language(max_tokens=2500)
-                        d_resp = await d_llm.ainvoke(prompt)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"story: scene for '{p['id']}' failed: {e}")
-                        return None
-                frag = d_resp.content if hasattr(d_resp, "content") else str(d_resp)
-                clean = sanitize_fragment(_strip_fences(frag), symbol_ids)
-                if clean is None:
-                    return None
-                return compose_page(clean, symbols, f"Illustration: {p['scene'] or title}")
-
-            scenes = await asyncio.gather(*(draw(p) for p in pages))
-            undrawn = 0
-            for p, svg in zip(pages, scenes):
-                if svg:
-                    p["svg"] = svg
-                else:
-                    undrawn += 1
-            if undrawn:
-                warnings.append(f"{undrawn} page(s) have no illustration.")
-
-        # ---- diffusion backgrounds (optional, degrades gracefully) ----------
+        out_dir = Path(request.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
         files: List[CreationFile] = []
         image_role = request.models.get("image")
-        if cfg.illustrations == "svg-with-backgrounds":
-            if image_role is None:
-                warnings.append(
-                    "No image model configured — backgrounds skipped (vector scenes only)."
-                )
-            else:
-                from pathlib import Path
+        want_pictures = cfg.illustrations == "pictures"
+        if want_pictures and image_role is None:
+            warnings.append(
+                "No image model configured — illustrations skipped (text-only story)."
+            )
+            want_pictures = False
 
-                out_dir = Path(request.output_dir)
-                out_dir.mkdir(parents=True, exist_ok=True)
-                img_model = image_role.create_image()
-                used_settings = {p["setting_id"] for p in pages if p["setting_id"]}
-                for s in settings:
-                    if s["id"] not in used_settings:
-                        continue
-                    prompt = (
-                        f"{_STYLE_PROMPTS[cfg.style]}, depicting {s['description'] or s['name']}. "
-                        f"Color palette strictly {', '.join(palette)}. Wide empty foreground. "
-                        "No characters, no animals, no people, no text, no letters."
+        if want_pictures:
+            img_model = image_role.create_image()
+            chars_by_id = {c["id"]: c for c in characters}
+            settings_by_id = {s["id"]: s for s in settings}
+
+            # Cast sheet: one reference image of the whole cast, reused on
+            # every page when the backend supports /images/edits.
+            cast_sheet: Optional[bytes] = None
+            if characters:
+                try:
+                    cast_sheet = await img_model.agenerate_image(
+                        _cast_sheet_prompt(characters, cfg.style, palette),
+                        size=_IMG_SIZE,
                     )
-                    try:
-                        raw_img = await img_model.agenerate_image(prompt, size=_BG_SIZE)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"story: background for '{s['id']}' failed: {e}")
-                        warnings.append(f"Background for '{s['name']}' could not be painted.")
-                        continue
-                    compressed, mime = _try_compress_jpeg(raw_img)
-                    s["background_data_uri"] = (
-                        f"data:{mime};base64,{base64.b64encode(compressed).decode()}"
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"story: cast sheet failed: {e}")
+                    warnings.append(
+                        "The cast reference sheet could not be painted; "
+                        "characters may vary more between pages."
                     )
-                    rel = f"background-{s['id']}.{ 'jpg' if mime == 'image/jpeg' else 'png' }"
-                    (out_dir / rel).write_bytes(compressed)
+                if cast_sheet is not None:
+                    sheet_bytes, sheet_mime = _try_compress_jpeg(cast_sheet)
+                    sheet_rel = (
+                        f"cast-sheet.{'jpg' if sheet_mime == 'image/jpeg' else 'png'}"
+                    )
+                    (out_dir / sheet_rel).write_bytes(sheet_bytes)
                     files.append(
                         CreationFile(
-                            filename=rel,
-                            content_type=mime,
-                            path=rel,
-                            label=f"background:{s['id']}",
+                            filename=sheet_rel,
+                            content_type=sheet_mime,
+                            path=sheet_rel,
+                            label="cast-sheet",
                         )
                     )
+
+            use_edits = cast_sheet is not None
+            edits_warned = False
+            sem = asyncio.Semaphore(_MAX_CONCURRENT_PAGES)
+
+            async def paint(p: Dict[str, Any]) -> Optional[bytes]:
+                nonlocal use_edits, edits_warned
+                page_chars = [chars_by_id[cid] for cid in p["character_ids"]]
+                async with sem:
+                    if use_edits:
+                        prompt = _page_prompt(
+                            p, settings_by_id.get(p["setting_id"] or ""),
+                            page_chars, cfg.style, palette, with_reference=True,
+                        )
+                        try:
+                            return await img_model.agenerate_image_edit(
+                                prompt, [cast_sheet], size=_IMG_SIZE
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            # Most likely the gateway/model has no edits
+                            # endpoint; drop to prompt-only for the whole book.
+                            use_edits = False
+                            if not edits_warned:
+                                edits_warned = True
+                                logger.warning(f"story: edits tier unavailable: {e}")
+                    prompt = _page_prompt(
+                        p, settings_by_id.get(p["setting_id"] or ""),
+                        page_chars, cfg.style, palette, with_reference=False,
+                    )
+                    try:
+                        return await img_model.agenerate_image(prompt, size=_IMG_SIZE)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"story: illustration for '{p['id']}' failed: {e}")
+                        return None
+
+            # Probe with the first page alone so the edits-vs-generations
+            # decision is made once, then fan out the rest concurrently.
+            first_raw = await paint(pages[0])
+            rest_raw = await asyncio.gather(*(paint(p) for p in pages[1:]))
+            undrawn = 0
+            for p, raw_img in zip(pages, [first_raw, *rest_raw]):
+                if raw_img is None:
+                    undrawn += 1
+                    continue
+                compressed, mime = _try_compress_jpeg(raw_img)
+                p["image_data_uri"] = (
+                    f"data:{mime};base64,{base64.b64encode(compressed).decode()}"
+                )
+                rel = f"page-{p['id']}.{'jpg' if mime == 'image/jpeg' else 'png'}"
+                (out_dir / rel).write_bytes(compressed)
+                files.append(
+                    CreationFile(
+                        filename=rel,
+                        content_type=mime,
+                        path=rel,
+                        label=f"page:{p['id']}",
+                    )
+                )
+            if undrawn:
+                warnings.append(f"{undrawn} page(s) have no illustration.")
 
         # ---- assemble -------------------------------------------------------
         story = StoryV1(
@@ -556,7 +603,7 @@ class StoryCreator(BaseCreator):
                     text=p["text"],
                     setting_id=p["setting_id"],
                     character_ids=p["character_ids"],
-                    svg=p["svg"],
+                    image_data_uri=p["image_data_uri"],
                     choices=[StoryChoice(**c) for c in p["choices"]],
                     is_ending=p["is_ending"],
                 )
@@ -565,10 +612,6 @@ class StoryCreator(BaseCreator):
             start_page_id=start_id if is_adventure else None,
         )
 
-        from pathlib import Path
-
-        out_dir = Path(request.output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
         book_rel = "story-book.html"
         (out_dir / book_rel).write_text(_book_html(story), "utf-8")
         files.append(

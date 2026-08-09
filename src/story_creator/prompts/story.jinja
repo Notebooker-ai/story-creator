@@ -15,7 +15,7 @@ Reading age: {{ reading_age }}.
   "dedication": "optional, or null",
   "moral": {% if story_type == "fable" %}"one sentence"{% else %}null{% endif %},
   "palette": ["#hex", "... 5–6 colors that define the book's world"],
-  "characters": [{"id": "kebab-id", "name": "...", "description": "3–4 LOCKED visual attributes (colors from the palette, shapes, one accessory)"}],
+  "characters": [{"id": "kebab-id", "name": "...", "description": "who they are in the story (role, personality)", "visual": "LOCKED appearance spec, one sentence an illustrator can repeat verbatim: species or age, build, hair/features, clothing with named colors, one signature accessory"}],
   "settings": [{"id": "kebab-id", "name": "...", "description": "what this place looks like, using palette colors"}],
   "start_page_id": "id of the first page",
   "pages": [
@@ -24,7 +24,7 @@ Reading age: {{ reading_age }}.
       "text": "the page's story text",
       "setting_id": "one of the setting ids",
       "character_ids": ["ids of characters visible on this page"],
-      "scene": "one sentence describing the illustration moment",
+      "scene": "one sentence describing the illustration moment: what we see, the action, the mood",
       "choices": [{"text": "...", "target_page_id": "..."}],
       "is_ending": false
     }
