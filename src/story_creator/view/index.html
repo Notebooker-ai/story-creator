@@ -27,10 +27,6 @@
          white-space:pre-wrap; }
   .moral { font-style:italic; color:var(--muted); margin-top:10px; }
   .ending { text-align:center; font-variant:small-caps; letter-spacing:2px; margin-top:14px; }
-  .choices { display:flex; flex-direction:column; gap:8px; padding:6px 4px 4px; }
-  .choices button { font:inherit; text-align:left; padding:12px 14px; border-radius:10px;
-                    border:1px solid #ddd; background:#fff; cursor:pointer; }
-  .choices button:hover { border-color:var(--accent); }
   nav { display:flex; align-items:center; justify-content:space-between; gap:8px;
         padding:10px 4px 4px; font-family: system-ui, sans-serif; }
   nav button { font:inherit; padding:8px 16px; border-radius:10px; border:1px solid #ddd;
@@ -53,7 +49,6 @@
   var byId = {};
   var linearOrder = [];
   var current = null;       // page id
-  var history = [];         // adventure back-stack
   var app = document.getElementById('app');
 
   function el(tag, cls, text) {
@@ -85,8 +80,6 @@
     return null;
   }
 
-  function isAdventure() { return story.story_type === 'adventure'; }
-
   function render() {
     var page = byId[current];
     if (!page) return;
@@ -94,9 +87,7 @@
 
     var header = el('header');
     var h1 = el('h1', null, story.title);
-    var meta = el('span', 'meta',
-      isAdventure() ? (page.is_ending ? 'an ending' : 'choose your path')
-                    : (page.number + ' / ' + linearOrder.length));
+    var meta = el('span', 'meta', page.number + ' / ' + linearOrder.length);
     header.appendChild(h1); header.appendChild(meta);
     app.appendChild(header);
 
@@ -123,44 +114,28 @@
     }
     app.appendChild(art);
 
+    var idx = linearOrder.indexOf(current);
     var txt = el('div', 'txt', page.text);
-    if (page.is_ending) txt.appendChild(el('p', 'ending', 'The End'));
-    if (page.is_ending && story.moral) txt.appendChild(el('p', 'moral', story.moral));
+    if (idx === linearOrder.length - 1) {
+      txt.appendChild(el('p', 'ending', 'The End'));
+      if (story.moral) txt.appendChild(el('p', 'moral', story.moral));
+    }
     app.appendChild(txt);
 
-    if (isAdventure()) {
-      var box = el('div', 'choices');
-      (page.choices || []).forEach(function (c) {
-        var b = el('button', null, c.text);
-        b.onclick = function () { history.push(current); current = c.target_page_id; render(); };
-        box.appendChild(b);
-      });
-      app.appendChild(box);
-      var nav = el('nav');
-      var back = el('button', null, '\u2190 Back');
-      back.disabled = history.length === 0;
-      back.onclick = function () { if (history.length) { current = history.pop(); render(); } };
-      var restart = el('button', null, 'Start over');
-      restart.onclick = function () { history = []; current = story.start_page_id || linearOrder[0]; render(); };
-      nav.appendChild(back); nav.appendChild(restart);
-      app.appendChild(nav);
-    } else {
-      var idx = linearOrder.indexOf(current);
-      var nav2 = el('nav');
-      var prev = el('button', null, '\u2190 Previous');
-      prev.disabled = idx <= 0;
-      prev.onclick = function () { if (idx > 0) { current = linearOrder[idx - 1]; render(); } };
-      var pos = el('span', 'pos', 'Page ' + page.number + ' of ' + linearOrder.length);
-      var next = el('button', null, 'Next \u2192');
-      next.disabled = idx >= linearOrder.length - 1;
-      next.onclick = function () { if (idx < linearOrder.length - 1) { current = linearOrder[idx + 1]; render(); } };
-      nav2.appendChild(prev); nav2.appendChild(pos); nav2.appendChild(next);
-      app.appendChild(nav2);
-    }
+    var nav = el('nav');
+    var prev = el('button', null, '\u2190 Previous');
+    prev.disabled = idx <= 0;
+    prev.onclick = function () { if (idx > 0) { current = linearOrder[idx - 1]; render(); } };
+    var pos = el('span', 'pos', 'Page ' + page.number + ' of ' + linearOrder.length);
+    var next = el('button', null, 'Next \u2192');
+    next.disabled = idx >= linearOrder.length - 1;
+    next.onclick = function () { if (idx < linearOrder.length - 1) { current = linearOrder[idx + 1]; render(); } };
+    nav.appendChild(prev); nav.appendChild(pos); nav.appendChild(next);
+    app.appendChild(nav);
   }
 
   document.addEventListener('keydown', function (e) {
-    if (!story || isAdventure()) return;
+    if (!story) return;
     var idx = linearOrder.indexOf(current);
     if (e.key === 'ArrowRight' && idx < linearOrder.length - 1) { current = linearOrder[idx + 1]; render(); }
     if (e.key === 'ArrowLeft' && idx > 0) { current = linearOrder[idx - 1]; render(); }
@@ -185,9 +160,9 @@
       app.appendChild(el('div', 'placeholder', 'This story has no pages.'));
       return;
     }
-    current = (isAdventure() && story.start_page_id && byId[story.start_page_id])
-      ? story.start_page_id : linearOrder[0];
-    history = [];
+    // Legacy branching artifacts are read straight through in page order —
+    // their choices and start page are ignored, not offered.
+    current = linearOrder[0];
     render();
   });
 

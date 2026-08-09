@@ -7,7 +7,8 @@ Reading age: {{ reading_age }}.
 {{ instructions }}{% endif %}
 
 # Form: {{ story_type }}
-{% if story_type == "picture-book" %}Exactly {{ num_pages }} pages, 1–3 short sentences per page. Simple vivid words. One clear visual moment per page.{% elif story_type == "short-story" %}About {{ num_pages }} pages; each page is 1–3 short paragraphs. A complete arc: setup, tension, resolution.{% elif story_type == "fable" %}About {{ num_pages }} pages, 2–5 sentences each. Animal (or object) characters embodying the ideas in the sources. End with a one-sentence "moral" field distilling the lesson.{% elif story_type == "bedtime" %}Exactly {{ num_pages }} pages, 1–3 gentle sentences each. A soothing arc that grows calmer page by page; the last page is quiet and sleepy. No peril.{% elif story_type == "adventure" %}A branching choose-your-own-path story of about {{ num_pages }} pages (graph nodes). Non-ending pages MUST offer 2–3 "choices", each with "text" and a "target_page_id" that exists. At least 2 pages are endings ("is_ending": true, no choices). Every page must be reachable from "start_page_id". Different paths should surface different ideas from the sources.{% endif %}
+The story is read straight through, first page to last. Never offer the reader choices or refer to page numbers.
+{% if story_type == "picture-book" %}Exactly {{ num_pages }} pages, 1–3 short sentences per page. Simple vivid words. One clear visual moment per page.{% elif story_type == "short-story" %}About {{ num_pages }} pages; each page is 1–3 short paragraphs. A complete arc: setup, tension, resolution.{% elif story_type == "fable" %}About {{ num_pages }} pages, 2–5 sentences each. Animal (or object) characters embodying the ideas in the sources. End with a one-sentence "moral" field distilling the lesson.{% elif story_type == "bedtime" %}Exactly {{ num_pages }} pages, 1–3 gentle sentences each. A soothing arc that grows calmer page by page; the last page is quiet and sleepy. No peril.{% endif %}
 
 # Output — ONLY this JSON object, nothing else
 {
@@ -17,20 +18,17 @@ Reading age: {{ reading_age }}.
   "palette": ["#hex", "... 5–6 colors that define the book's world"],
   "characters": [{"id": "kebab-id", "name": "...", "description": "who they are in the story (role, personality)", "visual": "LOCKED appearance spec, one sentence an illustrator can repeat verbatim: species or age, build, hair/features, clothing with named colors, one signature accessory"}],
   "settings": [{"id": "kebab-id", "name": "...", "description": "what this place looks like, using palette colors"}],
-  "start_page_id": "id of the first page",
   "pages": [
     {
       "id": "kebab-id",
       "text": "the page's story text",
       "setting_id": "one of the setting ids",
       "character_ids": ["ids of characters visible on this page"],
-      "scene": "one sentence describing the illustration moment: what we see, the action, the mood",
-      "choices": [{"text": "...", "target_page_id": "..."}],
-      "is_ending": false
+      "scene": "one sentence describing the illustration moment: what we see, the action, the mood"
     }
   ]
 }
-Use at most 4 characters and at most 4 settings; reuse settings across pages.
+List the pages in reading order. Use at most 4 characters and at most 4 settings; reuse settings across pages.
 
 # Source material
 {{ content }}
