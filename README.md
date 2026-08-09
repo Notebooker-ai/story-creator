@@ -14,6 +14,14 @@ passed as a reference on every page (reference conditioning — the creator
 probes the first page and falls back automatically). Without an image model
 the creator degrades gracefully to a text-only story.
 
+The `visual` spec must name skin tone and hair colour explicitly — those are
+the traits a diffusion backend re-invents when the spec leaves them unsaid —
+and every image prompt restates that they are locked for the whole book.
+Characters get ordinary human first names, animals in fables included. No
+prompt ever asks for lettering: the ban on text, signage and watermarks opens
+*and* closes each prompt, since backends discount a trailing-only negative in
+a long prompt.
+
 Outputs: the `story.v1` artifact (rendered by the bundled page-turner view)
 plus exactly three downloadable editions of the book — **HTML**, **EPUB** and
 **PDF**. The HTML book is self-contained, with the art inlined as data URIs;

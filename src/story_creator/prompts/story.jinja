@@ -10,13 +10,23 @@ Reading age: {{ reading_age }}.
 The story is read straight through, first page to last. Never offer the reader choices or refer to page numbers.
 {% if story_type == "picture-book" %}Exactly {{ num_pages }} pages, 1–3 short sentences per page. Simple vivid words. One clear visual moment per page.{% elif story_type == "short-story" %}About {{ num_pages }} pages; each page is 1–3 short paragraphs. A complete arc: setup, tension, resolution.{% elif story_type == "fable" %}About {{ num_pages }} pages, 2–5 sentences each. Animal (or object) characters embodying the ideas in the sources. End with a one-sentence "moral" field distilling the lesson.{% elif story_type == "bedtime" %}Exactly {{ num_pages }} pages, 1–3 gentle sentences each. A soothing arc that grows calmer page by page; the last page is quiet and sleepy. No peril.{% endif %}
 
+# Cast
+Give every character an ordinary human first name — Maya, Theo, Amara, Ines, Samuel — never a descriptive label ("the Curious One"), a title, or a species name.{% if story_type == "fable" %} The animal characters get human first names too.{% endif %}
+
+Each character's appearance is fixed for the entire book. Write it once, in "visual", as a spec an illustrator repeats verbatim on every page:
+- For a person, state in this order: apparent age, **skin tone as a named color** (deep brown, warm olive, pale freckled, golden tan), **hair color and style** (tight black coils, straight auburn bob), eye color, build, clothing with named colors, one signature accessory.
+- For an animal, state: species, fur/feather/scale colors, distinguishing markings, one signature accessory.
+Never leave skin tone or hair color unstated, and never change a character's skin, hair, clothing, or accessories between pages — not in "visual", not in "scene", not in the page text.
+
+Nothing in the illustrations is ever written down: no signs, labels, banners, book covers, letters, or numbers may appear in any "scene".
+
 # Output — ONLY this JSON object, nothing else
 {
   "title": "...",
   "dedication": "optional, or null",
   "moral": {% if story_type == "fable" %}"one sentence"{% else %}null{% endif %},
   "palette": ["#hex", "... 5–6 colors that define the book's world"],
-  "characters": [{"id": "kebab-id", "name": "...", "description": "who they are in the story (role, personality)", "visual": "LOCKED appearance spec, one sentence an illustrator can repeat verbatim: species or age, build, hair/features, clothing with named colors, one signature accessory"}],
+  "characters": [{"id": "kebab-id", "name": "human first name", "description": "who they are in the story (role, personality)", "visual": "LOCKED appearance spec, one sentence, per the Cast rules above — skin tone and hair color always named"}],
   "settings": [{"id": "kebab-id", "name": "...", "description": "what this place looks like, using palette colors"}],
   "pages": [
     {
@@ -24,7 +34,7 @@ The story is read straight through, first page to last. Never offer the reader c
       "text": "the page's story text",
       "setting_id": "one of the setting ids",
       "character_ids": ["ids of characters visible on this page"],
-      "scene": "one sentence describing the illustration moment: what we see, the action, the mood"
+      "scene": "one sentence describing the illustration moment: what we see, the action, the mood — no words or writing in the picture"
     }
   ]
 }

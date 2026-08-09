@@ -47,7 +47,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from story_creator.exports import write_book_files
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 SCHEMA_ID = "story.v1"
 _MAX_CONCURRENT_PAGES = 4
@@ -164,18 +164,44 @@ def _try_compress_jpeg(png_bytes: bytes) -> tuple[bytes, str]:
         return png_bytes, "image/png"
 
 
+# Diffusion backends happily letter a page unless told otherwise, and they
+# discount instructions buried at the end of a long prompt — so this leads
+# every prompt as well as closing it.
+_NO_TEXT = (
+    "No text anywhere in the image: no letters, words, numbers, captions, "
+    "titles, speech bubbles, signs, labels, or watermarks."
+)
+
+# The single biggest source of a character changing between pages is the model
+# re-inventing whatever the spec left unsaid, so name the traits that drift.
+_LOCKED_CAST = (
+    "Characters — these designs are LOCKED and identical on every page of the "
+    "book. Reproduce each one exactly as written: same skin tone, same hair "
+    "color and style, same eye color, same clothing colors, same accessories. "
+    "Never recolor, restyle, age, or otherwise reinterpret them: "
+)
+
+
+def _sentence(text: str) -> str:
+    """Close a prompt fragment so the joined parts don't run together."""
+    text = text.strip()
+    return text if not text or text[-1] in ".!?" else text + "."
+
+
 def _character_line(c: Dict[str, str]) -> str:
     return f"{c['name']} — {c.get('visual') or c.get('description') or ''}".strip(" —")
 
 
 def _cast_sheet_prompt(characters: List[Dict[str, str]], style: str, palette: List[str]) -> str:
     return (
-        f"Character model sheet, {_STYLE_PROMPTS[style]}. "
+        f"{_NO_TEXT} Character model sheet, {_STYLE_PROMPTS[style]}. "
         "All characters full-body, standing side by side on a plain light "
-        "background, facing forward: "
-        + "; ".join(_character_line(c) for c in characters)
-        + f". Color palette: {', '.join(palette)}. "
-        "No text, no letters, no labels, no words."
+        "background, facing forward. "
+        + _sentence(
+            _LOCKED_CAST + "; ".join(_character_line(c) for c in characters)
+        )
+        + f" Color palette: {', '.join(palette)}. "
+        + _NO_TEXT
     )
 
 
@@ -187,27 +213,31 @@ def _page_prompt(
     palette: List[str],
     with_reference: bool,
 ) -> str:
-    parts: List[str] = []
+    parts: List[str] = [_NO_TEXT]
     if with_reference:
         parts.append(
-            "Using the reference image as the definitive character designs, "
-            f"paint a children's picture-book illustration, {_STYLE_PROMPTS[style]}."
+            "Using the reference image as the definitive character designs — "
+            "copy each character's skin tone, hair, and clothing colors from "
+            "it exactly — paint a children's picture-book illustration, "
+            f"{_STYLE_PROMPTS[style]}."
         )
     else:
         parts.append(
             f"Children's picture-book illustration, {_STYLE_PROMPTS[style]}."
         )
-    parts.append(f"Scene: {page['scene'] or page['text'][:200]}")
+    parts.append(_sentence(f"Scene: {page['scene'] or page['text'][:200]}"))
     if setting:
-        parts.append(f"Setting: {setting['description'] or setting['name']}")
+        parts.append(
+            _sentence(f"Setting: {setting['description'] or setting['name']}")
+        )
     if characters:
         parts.append(
-            "Characters (must look EXACTLY like this — same colors, clothing, "
-            "and features on every page): "
-            + "; ".join(_character_line(c) for c in characters)
+            _sentence(
+                _LOCKED_CAST + "; ".join(_character_line(c) for c in characters)
+            )
         )
     parts.append(f"Color palette: {', '.join(palette)}.")
-    parts.append("No text, no letters, no words, no captions.")
+    parts.append(_NO_TEXT)
     return " ".join(parts)
 
 

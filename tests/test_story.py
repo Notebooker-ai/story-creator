@@ -212,6 +212,35 @@ def test_adventure_is_not_offered_as_a_story_type():
     assert "adventure" not in types
 
 
+@pytest.mark.parametrize("story_type", ["picture-book", "short-story", "fable", "bedtime"])
+def test_story_prompt_demands_human_names_and_a_fixed_appearance(story_type):
+    from ai_prompter import Prompter
+
+    from story_creator import _read_prompt
+
+    rendered = Prompter(template_text=_read_prompt("story.jinja")).render(
+        {
+            "content": "material",
+            "story_type": story_type,
+            "num_pages": 8,
+            "reading_age": "all-ages",
+            "style": "paper-cutout",
+            "language": None,
+            "instructions": None,
+        }
+    ).lower()
+
+    assert "ordinary human first name" in rendered
+    assert "skin tone as a named color" in rendered
+    assert "hair color and style" in rendered
+    assert "never leave skin tone or hair color unstated" in rendered
+    assert "no signs, labels, banners" in rendered
+    # A fable's animals still get human first names rather than species names.
+    assert ("animal characters get human first names" in rendered) == (
+        story_type == "fable"
+    )
+
+
 # --- book sources ------------------------------------------------------------
 
 
@@ -283,6 +312,38 @@ async def test_generate_picture_book_with_reference_conditioning():
         assert all(refs == [_TINY_PNG] for refs in model.edit_references)
         assert all("green woolen scarf" in p for p in model.edit_prompts)
         assert all("no text" in p.lower() for p in model.edit_prompts)
+
+
+@pytest.mark.asyncio
+async def test_every_image_prompt_locks_appearance_and_bans_text():
+    """The two traits that drift between pages — and lettering — are pinned."""
+    with tempfile.TemporaryDirectory() as td:
+        await StoryCreator().generate(
+            _request(
+                td,
+                [_story("picture-book", _linear_pages(4))],
+                {"story_type": "picture-book", "num_pages": 4},
+                image_role=_image_role("edits"),
+            )
+        )
+        model = _IMAGE_MODELS["edits"]
+        prompts = model.generate_prompts + model.edit_prompts
+        assert len(prompts) == 5  # cast sheet + one per page
+        for p in prompts:
+            low = p.lower()
+            assert "same skin tone" in low
+            assert "same hair color and style" in low
+            assert "locked" in low
+            # Leading AND trailing, since backends discount a trailing-only
+            # negative in a long prompt.
+            assert low.startswith("no text anywhere in the image")
+            assert low.rstrip().endswith("or watermarks.")
+        # The reference-conditioned pages say to take the colors from the sheet.
+        assert all(
+            "copy each character's skin tone, hair, and clothing colors from it"
+            in p
+            for p in model.edit_prompts
+        )
 
         book = open(f"{td}/story-book.html").read()
         assert "The Curious Fox" in book and "data:image/" in book
