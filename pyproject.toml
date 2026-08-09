@@ -6,7 +6,7 @@ description = "Open Notebook creator: illustrated stories from notebook sources 
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "open-notebook-creator-sdk",
+    "open-notebook-creator-sdk>=0.10",
     "esperanto>=2.19",
     "ai-prompter>=0.3.1",
     "langchain-core>=0.3",
@@ -33,7 +33,7 @@ build-backend = "hatchling.build"
 packages = ["src/story_creator"]
 
 [tool.uv.sources]
-open-notebook-creator-sdk = { git = "https://github.com/Notebooker-ai/open-notebook-creator-sdk.git", branch = "main" }
+open-notebook-creator-sdk = { git = "https://github.com/Notebooker-ai/open-notebook-creator-sdk.git", rev = "56ea7a674d1632381dde47b71299bd14a12d6035" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

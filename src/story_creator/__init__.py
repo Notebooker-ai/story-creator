@@ -331,6 +331,10 @@ class StoryCreator(BaseCreator):
             ],
             icon="book-heart",
             view=CreatorView(entry="view/index.html"),
+            suggestion_hint=(
+                "the narrative angle, which people or ideas from the content become "
+                "characters or setting, and the tone to tell it in"
+            ),
         )
 
     async def generate(self, request: CreationRequest) -> CreationResult:
