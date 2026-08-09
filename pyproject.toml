@@ -1,8 +1,8 @@
 [project]
 name = "story-creator"
-version = "0.3.1"
+version = "0.4.0"
 license = "MIT"
-description = "Open Notebook creator: illustrated stories from notebook sources — picture books, short stories, fables and bedtime stories with one AI-painted illustration per page, cast-consistent characters, and HTML/EPUB/PDF editions"
+description = "Open Notebook creator: illustrated stories from notebook sources — picture books, short stories, fables and bedtime stories for any reader from toddlers to adults, with one AI-painted illustration per page, cast-consistent characters, and HTML/EPUB/PDF editions"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

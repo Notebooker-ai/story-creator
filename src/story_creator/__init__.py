@@ -47,7 +47,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from story_creator.exports import write_book_files
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 SCHEMA_ID = "story.v1"
 _MAX_CONCURRENT_PAGES = 4
@@ -55,7 +55,9 @@ _MAX_SETTINGS = 6
 _IMG_SIZE = "1024x1024"
 
 StoryType = Literal["picture-book", "short-story", "fable", "bedtime"]
-ReadingAge = Literal["toddler", "early-reader", "middle-grade", "all-ages"]
+ReadingAge = Literal[
+    "toddler", "early-reader", "middle-grade", "young-adult", "adult", "all-ages"
+]
 Illustrations = Literal["none", "pictures"]
 Style = Literal["paper-cutout", "geometric", "night-sky"]
 
@@ -65,12 +67,33 @@ _STYLE_PROMPTS: Dict[str, str] = {
         "texture, gentle lighting"
     ),
     "geometric": (
-        "flat geometric style, simple bold shapes, clean mid-century "
-        "children's book look"
+        "flat geometric style, simple bold shapes, clean mid-century look"
     ),
     "night-sky": (
         "soft night-sky style, gentle silhouettes, stars, deep calm colors"
     ),
+}
+
+# What kind of book the art belongs in. Without this every page was prompted as
+# a "children's picture-book illustration", which drew a nursery even when the
+# story was written for adults.
+# (what kind of book, extra direction). Kept as a noun phrase so it reads
+# straight after "Illustration for …", with the tone as its own sentence
+# rather than a clause swallowed by the style description.
+_ART_REGISTER: Dict[str, tuple] = {
+    "toddler": ("a picture book for very young children", ""),
+    "early-reader": ("a picture book for early readers", ""),
+    "middle-grade": ("a middle-grade book", ""),
+    "young-adult": (
+        "a young-adult novel",
+        "Mature, grounded artwork for teenage readers — not cute, not babyish.",
+    ),
+    "adult": (
+        "a book for adult readers",
+        "Mature, grounded artwork for grown readers — never childlike, "
+        "cartoonish, or nursery-like.",
+    ),
+    "all-ages": ("a storybook for all ages", ""),
 }
 
 
@@ -86,7 +109,12 @@ class StoryConfig(BaseModel):
     )
     num_pages: int = Field(default=10, ge=4, le=24, description="How many pages")
     reading_age: ReadingAge = Field(
-        default="all-ages", description="toddler, early-reader, middle-grade, or all-ages"
+        default="all-ages",
+        description=(
+            "Who it is written for: toddler, early-reader, middle-grade, "
+            "young-adult, adult, or all-ages. This sets the prose and the "
+            "look of the art, so 'adult' reads and looks like an adult book."
+        ),
     )
     illustrations: Illustrations = Field(
         default="pictures",
@@ -164,12 +192,27 @@ def _try_compress_jpeg(png_bytes: bytes) -> tuple[bytes, str]:
         return png_bytes, "image/png"
 
 
-# Diffusion backends happily letter a page unless told otherwise, and they
-# discount instructions buried at the end of a long prompt — so this leads
-# every prompt as well as closing it.
+# Backends letter a page unless told otherwise, and they discount instructions
+# buried at the end of a long prompt — so the full rule leads every prompt and
+# a short reminder closes it.
+#
+# Banning "text" alone is not enough: lettering arrives on the furniture. A
+# classroom gets a whiteboard, and a whiteboard gets scribble; a wall gets
+# posters, and posters get titles. Naming those surfaces and requiring them
+# blank is what actually keeps a page clean. Speech balloons need calling out
+# twice over — asking for "no speech bubbles" has produced a drawn balloon
+# with nothing in it.
 _NO_TEXT = (
     "No text anywhere in the image: no letters, words, numbers, captions, "
-    "titles, speech bubbles, signs, labels, or watermarks."
+    "titles, signs, labels, handwriting, or watermarks. Every surface that "
+    "would normally carry writing is completely blank — whiteboards, "
+    "chalkboards, posters, notices, screens, book and magazine covers, "
+    "banners, charts, name tags, clothing prints. No speech balloons or "
+    "thought bubbles at all, not even empty ones."
+)
+_NO_TEXT_CLOSE = (
+    "Again: no lettering, no writing on any surface, no speech balloons — "
+    "boards, posters, screens and covers are all blank."
 )
 
 # The single biggest source of a character changing between pages is the model
@@ -192,16 +235,23 @@ def _character_line(c: Dict[str, str]) -> str:
     return f"{c['name']} — {c.get('visual') or c.get('description') or ''}".strip(" —")
 
 
-def _cast_sheet_prompt(characters: List[Dict[str, str]], style: str, palette: List[str]) -> str:
+def _cast_sheet_prompt(
+    characters: List[Dict[str, str]],
+    style: str,
+    palette: List[str],
+    reading_age: str,
+) -> str:
+    book, tone = _ART_REGISTER[reading_age]
     return (
-        f"{_NO_TEXT} Character model sheet, {_STYLE_PROMPTS[style]}. "
-        "All characters full-body, standing side by side on a plain light "
-        "background, facing forward. "
+        f"{_NO_TEXT} Character model sheet for {book}, "
+        f"{_STYLE_PROMPTS[style]}. {tone + ' ' if tone else ''}"
+        "All characters full-body, standing side by "
+        "side on a plain light background, facing forward. "
         + _sentence(
             _LOCKED_CAST + "; ".join(_character_line(c) for c in characters)
         )
         + f" Color palette: {', '.join(palette)}. "
-        + _NO_TEXT
+        + _NO_TEXT_CLOSE
     )
 
 
@@ -212,19 +262,21 @@ def _page_prompt(
     style: str,
     palette: List[str],
     with_reference: bool,
+    reading_age: str,
 ) -> str:
+    book, tone = _ART_REGISTER[reading_age]
     parts: List[str] = [_NO_TEXT]
     if with_reference:
         parts.append(
             "Using the reference image as the definitive character designs — "
             "copy each character's skin tone, hair, and clothing colors from "
-            "it exactly — paint a children's picture-book illustration, "
+            f"it exactly — paint an illustration for {book}, "
             f"{_STYLE_PROMPTS[style]}."
         )
     else:
-        parts.append(
-            f"Children's picture-book illustration, {_STYLE_PROMPTS[style]}."
-        )
+        parts.append(f"Illustration for {book}, {_STYLE_PROMPTS[style]}.")
+    if tone:
+        parts.append(tone)
     parts.append(_sentence(f"Scene: {page['scene'] or page['text'][:200]}"))
     if setting:
         parts.append(
@@ -237,7 +289,7 @@ def _page_prompt(
             )
         )
     parts.append(f"Color palette: {', '.join(palette)}.")
-    parts.append(_NO_TEXT)
+    parts.append(_NO_TEXT_CLOSE)
     return " ".join(parts)
 
 
@@ -252,9 +304,10 @@ class StoryCreator(BaseCreator):
             version=__version__,
             description=(
                 "Turn your sources into a story — a picture book, short story, "
-                "fable, or bedtime story — with one AI-painted illustration "
-                "per page and characters kept consistent across the whole "
-                "book. Download it as HTML, EPUB or PDF."
+                "fable, or bedtime story, written for any reader from toddlers "
+                "to adults — with one AI-painted illustration per page and "
+                "characters kept consistent across the whole book. Download it "
+                "as HTML, EPUB or PDF."
             ),
             sdk_compat=">=0.9,<1",
             emits=[SCHEMA_ID],
@@ -414,7 +467,9 @@ class StoryCreator(BaseCreator):
             if characters:
                 try:
                     cast_sheet = await img_model.agenerate_image(
-                        _cast_sheet_prompt(characters, cfg.style, palette),
+                        _cast_sheet_prompt(
+                            characters, cfg.style, palette, cfg.reading_age
+                        ),
                         size=_IMG_SIZE,
                     )
                 except Exception as e:  # noqa: BLE001
@@ -434,7 +489,8 @@ class StoryCreator(BaseCreator):
                     if use_edits:
                         prompt = _page_prompt(
                             p, settings_by_id.get(p["setting_id"] or ""),
-                            page_chars, cfg.style, palette, with_reference=True,
+                            page_chars, cfg.style, palette,
+                            with_reference=True, reading_age=cfg.reading_age,
                         )
                         try:
                             return await img_model.agenerate_image_edit(
@@ -449,7 +505,8 @@ class StoryCreator(BaseCreator):
                                 logger.warning(f"story: edits tier unavailable: {e}")
                     prompt = _page_prompt(
                         p, settings_by_id.get(p["setting_id"] or ""),
-                        page_chars, cfg.style, palette, with_reference=False,
+                        page_chars, cfg.style, palette,
+                        with_reference=False, reading_age=cfg.reading_age,
                     )
                     try:
                         return await img_model.agenerate_image(prompt, size=_IMG_SIZE)

@@ -212,33 +212,77 @@ def test_adventure_is_not_offered_as_a_story_type():
     assert "adventure" not in types
 
 
-@pytest.mark.parametrize("story_type", ["picture-book", "short-story", "fable", "bedtime"])
-def test_story_prompt_demands_human_names_and_a_fixed_appearance(story_type):
+def _render_story_prompt(story_type="short-story", reading_age="all-ages") -> str:
     from ai_prompter import Prompter
 
     from story_creator import _read_prompt
 
-    rendered = Prompter(template_text=_read_prompt("story.jinja")).render(
+    return Prompter(template_text=_read_prompt("story.jinja")).render(
         {
             "content": "material",
             "story_type": story_type,
             "num_pages": 8,
-            "reading_age": "all-ages",
+            "reading_age": reading_age,
             "style": "paper-cutout",
             "language": None,
             "instructions": None,
         }
     ).lower()
 
+
+@pytest.mark.parametrize("story_type", ["picture-book", "short-story", "fable", "bedtime"])
+def test_story_prompt_demands_human_names_and_a_fixed_appearance(story_type):
+    rendered = _render_story_prompt(story_type)
+
     assert "ordinary human first name" in rendered
     assert "skin tone as a named color" in rendered
     assert "hair color and style" in rendered
     assert "never leave skin tone or hair color unstated" in rendered
-    assert "no signs, labels, banners" in rendered
+    # The deepest fix for lettering: never write a moment that needs words.
+    assert "reads, writes, points at, or discusses words" in rendered
+    assert "no \"scene\" may call for signs, labels, banners" in rendered
     # A fable's animals still get human first names rather than species names.
     assert ("animal characters get human first names" in rendered) == (
         story_type == "fable"
     )
+
+
+def test_adult_stories_are_not_written_as_children_s_books():
+    adult = _render_story_prompt(reading_age="adult")
+    assert "not a children's book" in adult
+    assert "no cutesy framing" in adult
+    # And the picture-book registers stay put for the younger tiers.
+    assert "two- to four-year-olds" in _render_story_prompt(reading_age="toddler")
+    assert "teenagers" in _render_story_prompt(reading_age="young-adult")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reading_age,expected,forbidden",
+    [
+        ("adult", "for adult readers", "picture book"),
+        ("young-adult", "young-adult novel", "picture book"),
+        ("toddler", "picture book for very young children", "adult readers"),
+    ],
+)
+async def test_art_register_follows_the_reading_age(reading_age, expected, forbidden):
+    """An adult book must not be painted as a children's picture book."""
+    with tempfile.TemporaryDirectory() as td:
+        await StoryCreator().generate(
+            _request(
+                td,
+                [_story("short-story", _linear_pages(4))],
+                {"story_type": "short-story", "num_pages": 4,
+                 "reading_age": reading_age},
+                image_role=_image_role("edits"),
+            )
+        )
+        model = _IMAGE_MODELS["edits"]
+        prompts = model.generate_prompts + model.edit_prompts
+        assert prompts
+        for p in prompts:
+            assert expected in p
+            assert forbidden not in p
 
 
 # --- book sources ------------------------------------------------------------
@@ -337,7 +381,12 @@ async def test_every_image_prompt_locks_appearance_and_bans_text():
             # Leading AND trailing, since backends discount a trailing-only
             # negative in a long prompt.
             assert low.startswith("no text anywhere in the image")
-            assert low.rstrip().endswith("or watermarks.")
+            assert low.rstrip().endswith("covers are all blank.")
+            # Lettering arrives on the furniture, so the furniture is named.
+            for surface in ("whiteboards", "chalkboards", "posters", "screens"):
+                assert surface in low
+            # An empty balloon is still a balloon.
+            assert "not even empty ones" in low
         # The reference-conditioned pages say to take the colors from the sheet.
         assert all(
             "copy each character's skin tone, hair, and clothing colors from it"
