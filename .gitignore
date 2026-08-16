@@ -3,3 +3,4 @@ __pycache__/
 .playwright-mcp/
 .venv/
 uv.lock
+.DS_Store
